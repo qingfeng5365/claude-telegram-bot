@@ -1,0 +1,126 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Debian server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || '22' }}
+          script: |
+            set -euo pipefail
+
+            # 配置变量
+            BOT_USER="claude-telegram-bot"
+            APP_DIR="/opt/claude-telegram-bot"
+            LOG_DIR="/var/log/claude-telegram-bot"
+
+            # DeepSeek 后端
+            ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
+            ANTHROPIC_MODEL="deepseek-v4-pro[1m]"
+            ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-pro[1m]"
+            ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-v4-pro[1m]"
+            ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-v4-flash"
+            CLAUDE_CODE_SUBAGENT_MODEL="deepseek-v4-flash"
+            CLAUDE_CODE_EFFORT_LEVEL="max"
+
+            # ==================== 阶段1: 系统依赖 ====================
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq curl ca-certificates git nodejs python3 python3-venv
+
+            export PATH="/root/.local/bin:$PATH"
+            if ! command -v uv &>/dev/null; then
+              curl -LsSf https://astral.sh/uv/install.sh | sh
+            fi
+
+            # ==================== 阶段2: 用户和目录 ====================
+            if ! id -u "$BOT_USER" &>/dev/null; then
+              useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$BOT_USER"
+            fi
+            mkdir -p "$APP_DIR/projects" "$APP_DIR/data" "$LOG_DIR"
+            chown -R "$BOT_USER:$BOT_USER" "$APP_DIR" "$LOG_DIR"
+            chmod 750 "$APP_DIR"
+
+            # ==================== 阶段3: Claude CLI ====================
+            if ! command -v claude &>/dev/null; then
+              npm install -g @anthropic-ai/claude-code
+            else
+              npm update -g @anthropic-ai/claude-code
+            fi
+
+            # ==================== 阶段4: Bot 包 ====================
+            uv tool install --upgrade claude-code-telegram 2>/dev/null || uv tool install claude-code-telegram
+            BOT_BIN=$(find "$(uv tool dir)/claude-code-telegram" -name "claude-telegram-bot" -type f | head -1)
+
+            # ==================== 阶段5: .env 配置 ====================
+            curl -sSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/.env" -o "${APP_DIR}/.env"
+
+            sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" "${APP_DIR}/.env"
+            sed -i "s|^TELEGRAM_BOT_USERNAME=.*|TELEGRAM_BOT_USERNAME=${{ secrets.TELEGRAM_BOT_USERNAME }}|" "${APP_DIR}/.env"
+            sed -i "s|^ALLOWED_USERS=.*|ALLOWED_USERS=${{ secrets.TELEGRAM_ALLOWED_USERS }}|" "${APP_DIR}/.env"
+            sed -i "s|^MISTRAL_API_KEY=.*|MISTRAL_API_KEY=${{ secrets.MISTRAL_API_KEY }}|" "${APP_DIR}/.env"
+
+            chown "$BOT_USER:$BOT_USER" "${APP_DIR}/.env"
+            chmod 600 "${APP_DIR}/.env"
+
+            # ==================== 阶段6: systemd 服务 ====================
+            cat > /etc/systemd/system/claude-telegram-bot.service << SYSTEMD
+            [Unit]
+            Description=Claude Code Telegram Bot Service
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=simple
+            User=${BOT_USER}
+            WorkingDirectory=${APP_DIR}
+            ExecStart=${BOT_BIN}
+            Restart=on-failure
+            RestartSec=5
+            RestartPreventExitStatus=0
+            SuccessExitStatus=0
+
+            Environment="HOME=${APP_DIR}"
+            Environment="PATH=/usr/local/bin:/usr/bin:/bin:/root/.local/bin"
+            Environment="ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
+            Environment="ANTHROPIC_AUTH_TOKEN=${{ secrets.ANTHROPIC_AUTH_TOKEN }}"
+            Environment="ANTHROPIC_MODEL=${ANTHROPIC_MODEL}"
+            Environment="ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL}"
+            Environment="ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL}"
+            Environment="ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL}"
+            Environment="CLAUDE_CODE_SUBAGENT_MODEL=${CLAUDE_CODE_SUBAGENT_MODEL}"
+            Environment="CLAUDE_CODE_EFFORT_LEVEL=${CLAUDE_CODE_EFFORT_LEVEL}"
+
+            StandardOutput=append:${LOG_DIR}/stdout.log
+            StandardError=append:${LOG_DIR}/stderr.log
+
+            NoNewPrivileges=yes
+            PrivateTmp=yes
+            ProtectSystem=strict
+            ProtectHome=yes
+            ReadWritePaths=${APP_DIR} ${LOG_DIR}
+            ReadOnlyPaths=/
+            RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+            SystemCallFilter=@system-service
+
+            [Install]
+            WantedBy=multi-user.target
+            SYSTEMD
+
+            systemctl daemon-reload
+            systemctl enable claude-telegram-bot 2>/dev/null || true
+
+            # ==================== 阶段7: 重启 ====================
+            systemctl restart claude-telegram-bot
+            sleep 2
+            systemctl is-active claude-telegram-bot
