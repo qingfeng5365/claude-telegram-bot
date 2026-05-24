@@ -59,7 +59,7 @@ jobs:
             fi
 
             # ==================== 阶段4: Bot 包 ====================
-            uv tool install --upgrade claude-code-telegram 2>/dev/null || uv tool install claude-code-telegram
+            uv tool install "git+https://github.com/RichardAtCT/claude-code-telegram.git@v1.3.0"
             BOT_BIN=$(find "$(uv tool dir)/claude-code-telegram" -name "claude-telegram-bot" -type f | head -1)
 
             # ==================== 阶段5: .env 配置 ====================
