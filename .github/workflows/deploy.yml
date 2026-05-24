@@ -19,12 +19,9 @@ jobs:
           script: |
             set -euo pipefail
 
-            # 配置变量
-            BOT_USER="claude-telegram-bot"
             APP_DIR="/opt/claude-telegram-bot"
             LOG_DIR="/var/log/claude-telegram-bot"
 
-            # DeepSeek 后端
             ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
             ANTHROPIC_MODEL="deepseek-v4-pro[1m]"
             ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-v4-pro[1m]"
@@ -43,13 +40,8 @@ jobs:
               curl -LsSf https://astral.sh/uv/install.sh | sh
             fi
 
-            # ==================== 阶段2: 用户和目录 ====================
-            if ! id -u "$BOT_USER" &>/dev/null; then
-              useradd --system --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$BOT_USER"
-            fi
+            # ==================== 阶段2: 目录 ====================
             mkdir -p "$APP_DIR/projects" "$APP_DIR/data" "$LOG_DIR"
-            chown -R "$BOT_USER:$BOT_USER" "$APP_DIR" "$LOG_DIR"
-            chmod 750 "$APP_DIR"
 
             # ==================== 阶段3: Claude CLI ====================
             if ! command -v claude &>/dev/null; then
@@ -59,8 +51,9 @@ jobs:
             fi
 
             # ==================== 阶段4: Bot 包 ====================
-            uv tool install "git+https://github.com/RichardAtCT/claude-code-telegram.git@v1.3.0"
-            BOT_BIN=$(find "$(uv tool dir)/claude-code-telegram" -name "claude-telegram-bot" -type f | head -1)
+            uv tool install --upgrade "git+https://github.com/RichardAtCT/claude-code-telegram.git@v1.3.0" 2>/dev/null || \
+              uv tool install "git+https://github.com/RichardAtCT/claude-code-telegram.git@v1.3.0"
+            BOT_BIN="/root/.local/bin/claude-telegram-bot"
 
             # ==================== 阶段5: .env 配置 ====================
             curl -sSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/.env" -o "${APP_DIR}/.env"
@@ -69,9 +62,6 @@ jobs:
             sed -i "s|^TELEGRAM_BOT_USERNAME=.*|TELEGRAM_BOT_USERNAME=${{ secrets.TELEGRAM_BOT_USERNAME }}|" "${APP_DIR}/.env"
             sed -i "s|^ALLOWED_USERS=.*|ALLOWED_USERS=${{ secrets.TELEGRAM_ALLOWED_USERS }}|" "${APP_DIR}/.env"
             sed -i "s|^MISTRAL_API_KEY=.*|MISTRAL_API_KEY=${{ secrets.MISTRAL_API_KEY }}|" "${APP_DIR}/.env"
-
-            chown "$BOT_USER:$BOT_USER" "${APP_DIR}/.env"
-            chmod 600 "${APP_DIR}/.env"
 
             # ==================== 阶段6: systemd 服务 ====================
             cat > /etc/systemd/system/claude-telegram-bot.service << SYSTEMD
@@ -82,16 +72,11 @@ jobs:
 
             [Service]
             Type=simple
-            User=${BOT_USER}
             WorkingDirectory=${APP_DIR}
             ExecStart=${BOT_BIN}
             Restart=on-failure
             RestartSec=5
-            RestartPreventExitStatus=0
-            SuccessExitStatus=0
 
-            Environment="HOME=${APP_DIR}"
-            Environment="PATH=/usr/local/bin:/usr/bin:/bin:/root/.local/bin"
             Environment="ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
             Environment="ANTHROPIC_AUTH_TOKEN=${{ secrets.ANTHROPIC_AUTH_TOKEN }}"
             Environment="ANTHROPIC_MODEL=${ANTHROPIC_MODEL}"
@@ -103,15 +88,6 @@ jobs:
 
             StandardOutput=append:${LOG_DIR}/stdout.log
             StandardError=append:${LOG_DIR}/stderr.log
-
-            NoNewPrivileges=yes
-            PrivateTmp=yes
-            ProtectSystem=strict
-            ProtectHome=yes
-            ReadWritePaths=${APP_DIR} ${LOG_DIR}
-            ReadOnlyPaths=/
-            RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-            SystemCallFilter=@system-service
 
             [Install]
             WantedBy=multi-user.target
