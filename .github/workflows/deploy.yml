@@ -123,4 +123,10 @@ jobs:
             # ==================== 阶段7: 重启 ====================
             systemctl restart claude-telegram-bot
             sleep 2
-            systemctl is-active claude-telegram-bot
+            if ! systemctl is-active --quiet claude-telegram-bot; then
+              echo "=== 服务启动失败，诊断信息 ==="
+              systemctl status claude-telegram-bot || true
+              echo "---"
+              journalctl -u claude-telegram-bot --no-pager -n 50 || true
+              exit 1
+            fi
